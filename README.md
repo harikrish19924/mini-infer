@@ -1,8 +1,8 @@
 # tinyinfer
 
-A Kubernetes-native LLM serving platform in Go: an OpenAI-compatible streaming
-gateway plus an operator that deploys, routes, rate-limits, meters and autoscales
-model replicas (vLLM, or a simulated `fakemodel` for laptop development).
+A Kubernetes-native LLM serving platform in Go, built and benchmarked on real
+NVIDIA GPUs: an OpenAI-compatible streaming gateway plus an operator that
+deploys, routes, rate-limits, meters and autoscales vLLM replicas on k3s.
 
 > Work in progress.
 
@@ -10,19 +10,24 @@ model replicas (vLLM, or a simulated `fakemodel` for laptop development).
 
 | Path | What |
 |---|---|
-| `cmd/gateway` | Data plane: OpenAI-compatible proxy |
-| `cmd/fakemodel` | Simulated model server for development without a GPU |
-| `cmd/loadgen` | Benchmark client (TTFT, ITL, throughput) |
+| `cmd/gateway` | Data plane: OpenAI-compatible streaming proxy |
+| `cmd/loadgen` | Benchmark client: TTFT, ITL, throughput, cost per million tokens |
 | `operator/` | Kubebuilder project: `InferenceService` CRD, controller, autoscaler |
 | `internal/` | auth, ratelimit, metering, router, discovery, telemetry |
-| `deploy/` | Helm chart, k3d config, Grafana dashboards |
-| `bench/` | Load scenarios and committed results |
-| `docs/` | Design doc, inference primer, ADRs |
+| `internal/teststub` | Small `httptest` OpenAI stub for unit tests and CI (no GPU) |
+| `scripts/` | GPU node bootstrap, joining a second node, SSH tunnel |
+| `deploy/helm/tinyinfer` | Helm chart: CRD, operator, gateway, Redis, Postgres |
+| `deploy/gpu` | Device-plugin time-slicing config, RuntimeClass |
+| `deploy/samples` | Example `InferenceService` objects |
+| `deploy/dashboards` | Grafana dashboards |
+| `bench/` | Load scenarios and committed results (tagged with commit, GPU, vLLM version) |
+| `docs/` | Design doc, inference primer, GPU setup, ADRs |
 
 ## Development
 
 ```sh
-make build   # builds bin/gateway, bin/fakemodel, bin/loadgen
-make test
-make dev     # local k3d cluster
+make build   # builds bin/gateway, bin/loadgen
+make test    # unit tests against internal/teststub, no GPU needed
 ```
+
+Cluster setup on a GPU node: see [docs/gpu-setup.md](docs/gpu-setup.md).

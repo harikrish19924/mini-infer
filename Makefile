@@ -1,8 +1,7 @@
-CLUSTER  ?= tinyinfer
 BIN      := bin
-BINARIES := gateway fakemodel loadgen
+BINARIES := gateway loadgen
 
-.PHONY: all build test vet fmt lint clean dev dev-down $(BINARIES)
+.PHONY: all build test vet fmt lint clean $(BINARIES)
 
 all: build
 
@@ -23,10 +22,8 @@ fmt:
 clean:
 	rm -rf $(BIN)
 
-# Bring up the whole stack on a local k3d cluster.
-# Grows as phases land: images and the Helm install are added in phase 4.
-dev:
-	k3d cluster list $(CLUSTER) >/dev/null 2>&1 || k3d cluster create --config deploy/k3d/cluster.yaml
+session:   ## make session IP=1.2.3.4
+	./scripts/new-session.sh $(IP) --with-vllm
 
-dev-down:
-	k3d cluster delete $(CLUSTER)
+stop:
+	./scripts/new-session.sh stop

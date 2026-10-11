@@ -1,0 +1,25 @@
+# NVIDIA device plugin config: share one physical GPU between several pods.
+#
+# This is NOT a Kubernetes manifest (don't `kubectl apply` it). It is the
+# device plugin's own config file, passed to the Helm chart:
+#
+#   helm upgrade -i nvdp nvdp/nvidia-device-plugin \
+#     -n nvidia-device-plugin --create-namespace \
+#     --set runtimeClassName=nvidia \
+#     --set config.default=config \
+#     --set-file config.map.config=deploy/gpu/time-slicing.yaml
+#
+# Result: the node advertises `nvidia.com/gpu: 4` instead of 1, so up to 4 pods
+# that each request `nvidia.com/gpu: 1` can be scheduled on the single L4.
+#
+# IMPORTANT: time-slicing shares GPU *compute* (the GPU switches between pods),
+# NOT GPU *memory*. Every pod can still try to allocate all 24 GB, so each vLLM
+# pod must cap itself with --gpu-memory-utilization (e.g. 0.4 for two replicas).
+#
+# Keep this in sync with the copy embedded in scripts/bootstrap-gpu-node.sh.
+version: v1
+sharing:
+  timeSlicing:
+    resources:
+    - name: nvidia.com/gpu
+      replicas: 4
