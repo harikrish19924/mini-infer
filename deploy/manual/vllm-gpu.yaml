@@ -1,0 +1,117 @@
+# vLLM serving Qwen2.5-1.5B-Instruct on one time-sliced GPU slot.
+#
+#   kubectl apply -f deploy/manual/vllm-gpu.yaml
+#   kubectl logs -f deploy/vllm                  # watch download -> load -> ready
+#   kubectl port-forward svc/vllm 8000:8000
+#   curl localhost:8000/v1/models
+#
+# This is the same object scripts/bootstrap-gpu-node.sh --with-vllm creates
+# (same names), so applying it on a bootstrapped node just updates it.
+# In Phase 4 the operator generates this from an InferenceService.
+---
+# Cache for downloaded model weights, so pod restarts don't re-download.
+# Uses k3s's built-in "local-path" storage on the node's root disk; it is lost
+# when the E2E node is deleted (that's fine: small models re-download quickly).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+    model: qwen-1.5b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+        model: qwen-1.5b
+    spec:
+      # Start the container with containerd's "nvidia" runtime, which injects
+      # the GPU device files and driver libraries. Without it: no GPU inside.
+      runtimeClassName: nvidia
+      containers:
+      - name: vllm
+        # TODO: pin to a release tag (see Docker Hub vllm/vllm-openai tags)
+        # before benchmarking, so results stay comparable across sessions.
+        image: vllm/vllm-openai:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - >-
+          vllm serve Qwen/Qwen2.5-1.5B-Instruct
+          --served-model-name qwen-1.5b
+          --max-model-len 4096
+          --gpu-memory-utilization 0.4
+          --enable-prefix-caching
+        # --served-model-name        name clients send in "model": the gateway routes by it
+        # --max-model-len 4096       caps context length -> less KV cache per request -> more concurrency
+        # --gpu-memory-utilization   fraction of GPU memory vLLM reserves at startup (weights + KV cache);
+        #                            0.4 leaves room for a second replica on the same time-sliced L4
+        # --enable-prefix-caching    reuse KV blocks for shared prompt prefixes (Phase 6 depends on it)
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: 1          # one of the 4 time-sliced slots
+        volumeMounts:
+        - name: shm                    # PyTorch/vLLM need more than the default 64 MB /dev/shm
+          mountPath: /dev/shm
+        - name: hf-cache
+          mountPath: /root/.cache/huggingface
+        # Model loading takes minutes (pull image, download weights, load to GPU,
+        # warm up). The startupProbe gives it up to 15 min before Kubernetes
+        # considers the container dead; readiness gates traffic until /health is OK.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 90
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 15
+          failureThreshold: 4
+      volumes:
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: hf-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+spec:
+  selector:
+    app: vllm
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
