@@ -1,6 +1,7 @@
 # Inference primer
 
-Phase 0 deliverable, in my own words, checked against a live vLLM on the L4:
+Phase 0 deliverable, in my own words. Behaviour observed on the local CPU vLLM
+pod; the KV-capacity estimate is checked against the CUDA startup log in C0:
 
 1. Prefill vs decode (observed: long prompt vs long generation, TTFT vs ITL)
 2. KV cache: per-token size by hand for Qwen 2.5 1.5B and an 8B model,

@@ -5,10 +5,13 @@
 # Usage (on the GPU node, as root):
 #   bash bootstrap-gpu-node.sh               # GPU cluster only (steps 1-7)
 #   bash bootstrap-gpu-node.sh --with-vllm   # + deploy and test a small vLLM model (step 8)
+#   K3S_URL=https://<server-private-ip>:6443 K3S_TOKEN=<token> bash bootstrap-gpu-node.sh
+#                                            # join as a k3s agent (steps 1-4; used by join-gpu-node.sh)
 #
 # Optional environment variables:
 #   TS_REPLICAS=4                     pods that may share the GPU (time-slicing)
-#   K3S_VERSION=v1.xx.x+k3s1          pin k3s (default: latest stable)
+#   K3S_VERSION=v1.35.5+k3s1          pin k3s; keep in step with local-up.sh
+#   SKIP_GPU=1                        skip every NVIDIA step (for vm-test.sh in GPU-less VMs)
 #   VLLM_TAG=latest                   vllm/vllm-openai image tag — PIN THIS for benchmarks
 #   VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
 #   VLLM_NAME=qwen-1.5b               served model name clients use
@@ -22,14 +25,18 @@ WITH_VLLM=0
 for arg in "$@"; do
   case "$arg" in
     --with-vllm) WITH_VLLM=1 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (try --help)"; exit 1 ;;
   esac
 done
 
 TS_REPLICAS="${TS_REPLICAS:-4}"
-K3S_VERSION="${K3S_VERSION:-}"
+K3S_VERSION="${K3S_VERSION:-v1.35.5+k3s1}"
 SKIP_SMOKE_TEST="${SKIP_SMOKE_TEST:-0}"
+SKIP_GPU="${SKIP_GPU:-0}"
+K3S_URL="${K3S_URL:-}"
+K3S_TOKEN="${K3S_TOKEN:-}"
+ROLE=server; [ -n "$K3S_URL" ] && ROLE=agent
 VLLM_TAG="${VLLM_TAG:-latest}"
 VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 VLLM_NAME="${VLLM_NAME:-qwen-1.5b}"
@@ -37,16 +44,22 @@ CUDA_TEST_IMAGE="nvidia/cuda:12.4.1-base-ubuntu22.04"
 WORKDIR=/root/tinyinfer
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
-STEPS=7; [ "$WITH_VLLM" = "1" ] && STEPS=8
+STEPS=7; [ "$WITH_VLLM" = "1" ] && STEPS=8; [ "$ROLE" = "agent" ] && STEPS=4
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf '\n\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 START=$(date +%s)
 
 [ "$(id -u)" -eq 0 ] || fail "Run as root: sudo -i, then bash $0"
 command -v apt-get >/dev/null || fail "This script expects an Ubuntu/Debian image."
+[ "$ROLE" = "agent" ] && [ -z "$K3S_TOKEN" ] && fail "K3S_URL is set but K3S_TOKEN is empty"
+[ "$ROLE" = "agent" ] && [ "$WITH_VLLM" = "1" ] && fail "--with-vllm is for the server node only"
+[ "$SKIP_GPU" = "1" ] && [ "$WITH_VLLM" = "1" ] && fail "--with-vllm needs a GPU; drop SKIP_GPU"
 mkdir -p "$WORKDIR"
 
 # ---------------------------------------------------------------------------
+if [ "$SKIP_GPU" = "1" ]; then
+log "1/$STEPS NVIDIA driver check skipped (SKIP_GPU=1)"
+else
 log "1/$STEPS Checking the NVIDIA driver (waits up to 5 min; GPU nodes initialise on first boot)"
 for _ in $(seq 1 30); do nvidia-smi >/dev/null 2>&1 && break; sleep 10; done
 if ! nvidia-smi >/dev/null 2>&1; then
@@ -56,6 +69,7 @@ if ! nvidia-smi >/dev/null 2>&1; then
     reboot"
 fi
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+fi
 
 # ---------------------------------------------------------------------------
 log "2/$STEPS Base packages"
@@ -64,6 +78,9 @@ apt-get update -y
 apt-get install -y curl gnupg ca-certificates jq
 
 # ---------------------------------------------------------------------------
+if [ "$SKIP_GPU" = "1" ]; then
+log "3/$STEPS NVIDIA container toolkit skipped (SKIP_GPU=1)"
+else
 log "3/$STEPS NVIDIA container toolkit (must be installed BEFORE k3s starts)"
 if ! dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
@@ -76,27 +93,50 @@ if ! dpkg -s nvidia-container-toolkit >/dev/null 2>&1; then
 else
   echo "already installed: $(nvidia-ctk --version | head -n 1)"
 fi
+fi
 
 # ---------------------------------------------------------------------------
-log "4/$STEPS k3s"
-if ! command -v k3s >/dev/null 2>&1; then
-  curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+log "4/$STEPS k3s $K3S_VERSION ($ROLE)"
+if [ "$ROLE" = "agent" ]; then
+  # The install script sees K3S_URL/K3S_TOKEN in its environment and sets up k3s-agent.
+  if ! command -v k3s >/dev/null 2>&1; then
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${K3S_VERSION}" K3S_URL="$K3S_URL" K3S_TOKEN="$K3S_TOKEN" sh -s - agent
+  else
+    echo "k3s already installed: $(k3s --version | head -n 1); restarting the agent so it re-detects the NVIDIA runtime"
+    systemctl restart k3s-agent
+  fi
+  for _ in $(seq 1 30); do systemctl is-active --quiet k3s-agent && break; sleep 5; done
+  systemctl is-active --quiet k3s-agent || fail "k3s-agent is not running. Check: journalctl -u k3s-agent -n 50"
 else
-  echo "k3s already installed: $(k3s --version | head -n 1); restarting so it re-detects the NVIDIA runtime"
-  systemctl restart k3s
+  if ! command -v k3s >/dev/null 2>&1; then
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+  else
+    echo "k3s already installed: $(k3s --version | head -n 1); restarting so it re-detects the NVIDIA runtime"
+    systemctl restart k3s
+  fi
+  for _ in $(seq 1 30); do kubectl get nodes >/dev/null 2>&1 && break; sleep 5; done
+  kubectl wait --for=condition=Ready node --all --timeout=180s
+
+  # Make kubectl/helm find the cluster in every future root shell
+  grep -qxF "export KUBECONFIG=$KUBECONFIG" /root/.bashrc 2>/dev/null \
+    || echo "export KUBECONFIG=$KUBECONFIG" >> /root/.bashrc
 fi
-for _ in $(seq 1 30); do kubectl get nodes >/dev/null 2>&1 && break; sleep 5; done
-kubectl wait --for=condition=Ready node --all --timeout=180s
 
-# Make kubectl/helm find the cluster in every future root shell
-grep -qxF "export KUBECONFIG=$KUBECONFIG" /root/.bashrc 2>/dev/null \
-  || echo "export KUBECONFIG=$KUBECONFIG" >> /root/.bashrc
+if [ "$SKIP_GPU" != "1" ]; then
+  # containerd's generated config; the file name changed across k3s releases
+  CONTAINERD_CFG=/var/lib/rancher/k3s/agent/etc/containerd
+  if grep -qi nvidia "$CONTAINERD_CFG"/config*.toml 2>/dev/null; then
+    echo "containerd has an nvidia runtime entry"
+  else
+    fail "k3s did not detect the NVIDIA runtime ($CONTAINERD_CFG/config*.toml). Check 'which nvidia-container-runtime', then restart k3s / k3s-agent"
+  fi
+fi
 
-CONTAINERD_CFG=/var/lib/rancher/k3s/agent/etc/containerd/config.toml
-if grep -qi nvidia "$CONTAINERD_CFG" 2>/dev/null; then
-  echo "containerd has an nvidia runtime entry"
-else
-  fail "k3s did not detect the NVIDIA runtime ($CONTAINERD_CFG). Check 'which nvidia-container-runtime', then: systemctl restart k3s"
+if [ "$ROLE" = "agent" ]; then
+  ELAPSED=$(( ($(date +%s) - START) / 60 ))
+  printf '\n\033[32mJoined %s as a k3s agent in ~%s min.\033[0m\n' "$K3S_URL" "$ELAPSED"
+  echo "The server labels this node and the device plugin DaemonSet starts on it (join-gpu-node.sh does this)."
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -114,10 +154,16 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+if [ "$SKIP_GPU" = "1" ]; then
+log "6/$STEPS Helm (NVIDIA device plugin skipped: SKIP_GPU=1)"
+GPUS="none (SKIP_GPU)"
+else
 log "6/$STEPS Helm + NVIDIA device plugin with time-slicing x${TS_REPLICAS}"
+fi
 if ! command -v helm >/dev/null 2>&1; then
   curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 fi
+if [ "$SKIP_GPU" != "1" ]; then
 
 # The chart only schedules on nodes labelled as having an NVIDIA GPU. That label
 # normally comes from Node Feature Discovery, which we don't install, so add it.
@@ -153,9 +199,10 @@ if [ -z "$GPUS" ] || [ "$GPUS" = "0" ]; then
   fail "nvidia.com/gpu never became allocatable. Check: kubectl -n nvidia-device-plugin logs -l app.kubernetes.io/name=nvidia-device-plugin --all-containers"
 fi
 echo "allocatable nvidia.com/gpu = ${GPUS}"
+fi
 
 # ---------------------------------------------------------------------------
-if [ "$SKIP_SMOKE_TEST" != "1" ]; then
+if [ "$SKIP_SMOKE_TEST" != "1" ] && [ "$SKIP_GPU" != "1" ]; then
   log "7/$STEPS Smoke test: running nvidia-smi inside a pod"
   kubectl delete pod gpu-smoke --ignore-not-found >/dev/null
   kubectl apply -f - <<EOF

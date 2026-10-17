@@ -1,6 +1,6 @@
 # vLLM serving Qwen2.5-1.5B-Instruct on one time-sliced GPU slot.
 #
-#   kubectl apply -f deploy/samples/vllm-qwen.yaml
+#   kubectl apply -f deploy/manual/vllm-gpu.yaml
 #   kubectl logs -f deploy/vllm                  # watch download -> load -> ready
 #   kubectl port-forward svc/vllm 8000:8000
 #   curl localhost:8000/v1/models

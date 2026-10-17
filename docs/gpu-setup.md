@@ -1,5 +1,8 @@
 # GPU setup on E2E
 
+> Used in the weeks 11–13 campaign (run C0 onwards). Day-to-day development runs
+> on the local k3d mirror: see [local-dev.md](local-dev.md).
+
 How tinyinfer gets a working GPU Kubernetes cluster: an E2E Cloud L4 node running
 k3s, with the GPU shared between pods by time-slicing, and vLLM serving a model.
 The node is **disposable**: it is created at the start of a session and deleted at
@@ -30,7 +33,7 @@ Each layer depends on the one below it, which is why the setup order matters.
 | `scripts/new-session.sh` | laptop, every session | Copies + runs the bootstrap on a fresh node, fetches kubeconfig, opens the tunnel |
 | `scripts/bootstrap-gpu-node.sh` | node (copied by `new-session.sh`) | Driver check, toolkit, k3s, device plugin, smoke tests, optional vLLM |
 | `deploy/gpu/time-slicing.yaml` | Helm value file | Advertises 1 GPU as 4 schedulable slots |
-| `deploy/samples/vllm-qwen.yaml` | `kubectl apply` | vLLM serving Qwen2.5-1.5B-Instruct |
+| `deploy/manual/vllm-gpu.yaml` | `kubectl apply` | vLLM serving Qwen2.5-1.5B-Instruct |
 
 ## One-time setup
 
@@ -115,7 +118,7 @@ runs `nvidia-smi`. If its log shows the L4, the whole chain works:
 pod → RuntimeClass → toolkit → driver → GPU.
 
 ### 7. vLLM (with `--with-vllm`)
-Applies the equivalent of `deploy/samples/vllm-qwen.yaml`, waits for the rollout
+Applies the equivalent of `deploy/manual/vllm-gpu.yaml`, waits for the rollout
 (first time: image pull + weight download, several minutes) and sends a test chat
 request. The YAML comments explain every field; the key ones:
 

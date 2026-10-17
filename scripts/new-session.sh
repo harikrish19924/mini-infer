@@ -11,7 +11,9 @@
 #   NODE_USER=root                   login user on the node
 #   SSH_KEY=~/.ssh/e2e_gpu           private key matching the one added to E2E
 #   BOOTSTRAP=./bootstrap-gpu-node.sh
-#   VLLM_TAG / VLLM_MODEL / VLLM_NAME / TS_REPLICAS   passed through to the node
+#   KUBECONFIG_OUT=~/.kube/tinyinfer.yaml   where the cluster's kubeconfig is written
+#   TUNNEL_SOCKET=~/.ssh/tinyinfer-tunnel.sock
+#   VLLM_TAG / VLLM_MODEL / VLLM_NAME / TS_REPLICAS / K3S_VERSION / SKIP_GPU   passed through to the node
 
 set -euo pipefail
 
@@ -19,8 +21,8 @@ NODE_USER="${NODE_USER:-root}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/e2e_gpu}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOOTSTRAP="${BOOTSTRAP:-$SCRIPT_DIR/bootstrap-gpu-node.sh}"
-KUBECONFIG_OUT="$HOME/.kube/tinyinfer.yaml"
-TUNNEL_SOCKET="$HOME/.ssh/tinyinfer-tunnel.sock"
+KUBECONFIG_OUT="${KUBECONFIG_OUT:-$HOME/.kube/tinyinfer.yaml}"
+TUNNEL_SOCKET="${TUNNEL_SOCKET:-$HOME/.ssh/tinyinfer-tunnel.sock}"
 
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf '\n\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -35,7 +37,7 @@ stop_tunnel() {
   fi
 }
 
-[ $# -ge 1 ] || { sed -n '2,15p' "$0"; exit 1; }
+[ $# -ge 1 ] || { sed -n '2,17p' "$0"; exit 1; }
 if [ "$1" = "stop" ]; then
   stop_tunnel
   echo "Now DELETE the node in E2E MyAccount (Compute → Nodes → Delete)."
@@ -70,17 +72,18 @@ done
 
 # ---------------------------------------------------------------------------
 log "2/5 Copying bootstrap script"
-scp "${SSH_OPTS[@]}" "$BOOTSTRAP" "$TARGET:/root/bootstrap-gpu-node.sh"
+# Into the login user's home: a non-root NODE_USER can't write to /root
+scp "${SSH_OPTS[@]}" "$BOOTSTRAP" "$TARGET:bootstrap-gpu-node.sh"
 
 # ---------------------------------------------------------------------------
 log "3/5 Running bootstrap on the node (10-20 min the first time)"
 REMOTE_ENV=""
-for v in VLLM_TAG VLLM_MODEL VLLM_NAME TS_REPLICAS K3S_VERSION; do
+for v in VLLM_TAG VLLM_MODEL VLLM_NAME TS_REPLICAS K3S_VERSION SKIP_GPU; do
   if [ -n "${!v:-}" ]; then REMOTE_ENV="$REMOTE_ENV $v=$(printf '%q' "${!v}")"; fi
 done
 SUDO=""; [ "$NODE_USER" != "root" ] && SUDO="sudo"
 # -t gives live, coloured output from the node
-ssh -t "${SSH_OPTS[@]}" "$TARGET" "$SUDO env $REMOTE_ENV bash /root/bootstrap-gpu-node.sh $BOOT_ARGS"
+ssh -t "${SSH_OPTS[@]}" "$TARGET" "$SUDO env $REMOTE_ENV bash bootstrap-gpu-node.sh $BOOT_ARGS"
 
 # ---------------------------------------------------------------------------
 log "4/5 Fetching kubeconfig to $KUBECONFIG_OUT"

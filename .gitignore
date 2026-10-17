@@ -6,3 +6,6 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# local bench runs: never published (E2E results go in bench/results/)
+bench/local-runs/

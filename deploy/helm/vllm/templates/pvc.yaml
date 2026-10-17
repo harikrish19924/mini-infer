@@ -1,0 +1,19 @@
+{{- if .Values.weightsCache.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vllm.weightsCacheName" . }}
+  labels:
+    {{- include "vllm.labels" . | nindent 4 }}
+  annotations:
+    # Keep downloaded weights across `helm uninstall`; delete by hand with kubectl.
+    helm.sh/resource-policy: keep
+spec:
+  # One node can mount it; replicas on the same node share it.
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.weightsCache.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.weightsCache.size }}
+{{- end }}

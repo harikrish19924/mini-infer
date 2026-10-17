@@ -1,0 +1,316 @@
+---
+# Source: tinyinfer/templates/postgres/postgres.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tinyinfer-postgres
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: postgres
+  annotations:
+    # Survive `helm uninstall` like the data volume does: Postgres only reads
+    # POSTGRES_PASSWORD when it first creates the database, so a new password
+    # on reinstall would lock the gateway out of the old data.
+    helm.sh/resource-policy: keep
+type: Opaque
+stringData:
+  user: "tinyinfer"
+  password: "Y7nYHwH6aNBvv0DqCq5aafjX"
+  database: "tinyinfer"
+  database-url: "postgres://tinyinfer:Y7nYHwH6aNBvv0DqCq5aafjX@tinyinfer-postgres:5432/tinyinfer?sslmode=disable"
+---
+# Source: tinyinfer/templates/vllm/model.yaml
+# Weights cache, so pod restarts don't download again. RWO on local-path:
+# replicas share it only while they run on the same node (not for C6).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tinyinfer-vllm-qwen-0-5b-hf-cache
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: vllm
+  annotations:
+    # Keep downloaded weights across `helm uninstall`.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Source: tinyinfer/templates/postgres/postgres.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinyinfer-postgres
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: postgres
+spec:
+  selector:
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# Source: tinyinfer/templates/redis/redis.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinyinfer-redis
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: redis
+spec:
+  selector:
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+# Source: tinyinfer/templates/vllm/model.yaml
+# Headless: DNS returns every ready pod's IP, so the gateway can balance across
+# replicas itself instead of through kube-proxy. port-forward svc/... still works.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tinyinfer-vllm-qwen-0-5b
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: vllm
+    tinyinfer.dev/model: qwen-0-5b
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: vllm
+    tinyinfer.dev/model: qwen-0-5b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+# Source: tinyinfer/templates/redis/redis.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tinyinfer-redis
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: tinyinfer
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: tinyinfer
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: tinyinfer
+        app.kubernetes.io/component: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          # In-memory only: token buckets refill on their own after a restart.
+          args: ["--save", "", "--appendonly", "no"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+---
+# Source: tinyinfer/templates/vllm/model.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tinyinfer-vllm-qwen-0-5b
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: vllm
+    tinyinfer.dev/model: qwen-0-5b
+spec:
+  # Not `default 1`: default treats 0 as empty and would turn replicas: 0 into 1.
+  # Missing or null -> 1; any number, including 0, is kept.
+  replicas: 2
+  # Stop an old pod before starting its replacement. A surge pod would need a
+  # third slot of memory: OOM on k3d, and on E2E 3 x 0.4 of the L4 > 100%.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: tinyinfer
+      app.kubernetes.io/component: vllm
+      tinyinfer.dev/model: qwen-0-5b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: tinyinfer
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: tinyinfer
+        app.kubernetes.io/component: vllm
+        tinyinfer.dev/model: qwen-0-5b
+    spec:
+      # nvidia -> NVIDIA container runtime on E2E; -> runc on k3d (deploy/local).
+      runtimeClassName: nvidia
+      containers:
+        - name: vllm
+          image: "vllm/vllm-openai-cpu:v0.31.0"
+          command: ["vllm", "serve"]
+          args:
+            - "Qwen/Qwen2.5-0.5B-Instruct"
+            - --served-model-name=qwen-0.5b
+            - --max-model-len=4096
+            - --enable-prefix-caching
+          env:
+            - name: VLLM_CPU_KVCACHE_SPACE   # KV cache size in GiB
+              value: "2"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "2"
+              memory: 3Gi
+            limits:
+              nvidia.com/gpu: 1
+              memory: 5Gi
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+          # A saturated vLLM (the point of a sweep) can take seconds to answer
+          # /health. With the 1 s default timeout, readiness would drop the pod
+          # from DNS and liveness would restart it mid-benchmark.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 120
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Only for a hung engine: restarts after ~3 min of failed checks.
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: tinyinfer-vllm-qwen-0-5b-hf-cache
+---
+# Source: tinyinfer/templates/postgres/postgres.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tinyinfer-postgres
+  labels:
+    app.kubernetes.io/part-of: tinyinfer
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tinyinfer-0.1.0
+    app.kubernetes.io/instance: tinyinfer
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: tinyinfer-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: tinyinfer
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: tinyinfer
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/instance: tinyinfer
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: tinyinfer-postgres, key: user } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: tinyinfer-postgres, key: password } }
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: tinyinfer-postgres, key: database } }
+            # A subdirectory: the volume's root may contain lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1Gi
