@@ -33,6 +33,28 @@ type CompletionRequest struct {
 	Stream    *bool           `json:"stream"`
 }
 
+// StreamChunk is the part of one streamed SSE event the gateway reads: the
+// text it carries (for TTFT) and, in the last chunk, the token counts.
+type StreamChunk struct {
+	Choices []StreamChoice `json:"choices"`
+	Usage   *Usage         `json:"usage"`
+}
+
+// StreamChoice holds the new text: Delta.Content for chat, Text for completions.
+type StreamChoice struct {
+	Delta struct {
+		Content string `json:"content"`
+	} `json:"delta"`
+	Text string `json:"text"`
+}
+
+// Usage is the token count vLLM sends when stream_options.include_usage is true.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 // ErrorResponse is the body of every error the gateway returns.
 type ErrorResponse struct {
 	Error Error `json:"error"`

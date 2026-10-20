@@ -41,15 +41,6 @@ func (a *api) handleGeneration(c *gin.Context, parse func([]byte) (*proxyRequest
 	a.proxy(c, req)
 }
 
-// proxy will stream the request to a vLLM replica (phase 2, step 3).
-func (a *api) proxy(c *gin.Context, req *proxyRequest) {
-	writeError(c, &apiError{
-		status:  http.StatusNotImplemented,
-		errType: "server_error",
-		message: "proxying to vLLM is not implemented yet",
-	})
-}
-
 // listModels answers from the gateway's own model list, not from vLLM.
 func (a *api) listModels(c *gin.Context) {
 	list := openai.ModelList{Object: "list", Data: make([]openai.Model, 0, len(a.models))}

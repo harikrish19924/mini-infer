@@ -18,10 +18,17 @@ func main() {
 		addr = ":9090" // not 8080: k3d maps the Mac's 8080 to the cluster ingress
 	}
 
+	// VLLM_URL is where vLLM listens: http://localhost:8000 with a port-forward,
+	// or the Service's DNS name inside the cluster.
+	vllmURL := os.Getenv("VLLM_URL")
+	if vllmURL == "" {
+		vllmURL = "http://localhost:8000"
+	}
+
 	// TODO(phase 2, step 5): read models from the TINYINFER_CONFIG file.
 	// These match deploy/helm/vllm's --served-model-name and --max-model-len.
 	models := []gateway.Model{
-		{Name: "qwen-0.5b", MaxModelLen: 4096},
+		{Name: "qwen-0.5b", MaxModelLen: 4096, Endpoint: vllmURL},
 	}
 
 	srv := gateway.New(addr, models)

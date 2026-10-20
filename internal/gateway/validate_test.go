@@ -14,16 +14,26 @@ import (
 	"github.com/harikrish19924/mini-infer/internal/openai"
 )
 
+var testModels []Model
+
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
-	os.Exit(m.Run())
+
+	// A stand-in vLLM that accepts anything, so requests that pass validation
+	// get a 200 through the proxy.
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	testModels = []Model{{Name: "qwen-0.5b", MaxModelLen: 4096, Endpoint: okUpstream.URL}}
+
+	code := m.Run()
+	okUpstream.Close()
+	os.Exit(code)
 }
 
-var testModels = []Model{{Name: "qwen-0.5b", MaxModelLen: 4096}}
-
-// A request that passes validation reaches the proxy, which still answers 501
-// until step 3; so 501 here means "valid".
-const passed = http.StatusNotImplemented
+// A request that passes validation reaches the stand-in vLLM, so 200 here means "valid".
+const passed = http.StatusOK
 
 func TestValidation(t *testing.T) {
 	tests := []struct {
@@ -116,10 +126,10 @@ func TestValidation(t *testing.T) {
 			if rec.Code != tt.wantCode {
 				t.Fatalf("status = %d, want %d; body: %s", rec.Code, tt.wantCode, rec.Body)
 			}
-			e := decodeError(t, rec)
 			if tt.wantCode == passed {
 				return
 			}
+			e := decodeError(t, rec)
 			if e.Type != "invalid_request_error" {
 				t.Errorf("type = %q, want invalid_request_error", e.Type)
 			}
